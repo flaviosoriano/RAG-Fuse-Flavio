@@ -5,12 +5,12 @@ folds: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
 splits: [ "train", "val", "test" ]
 
 text_max_length: 256
-label_max_length: 16
+label_max_length: 256
 vocabulary_size: 10000
 
 num_labels: 103
 num_texts: 804414
-num_relevant_labels: 3
+num_relevant_labels: 2
 
 llm:
   prompt_opt:
@@ -20,7 +20,7 @@ llm:
 batch_size: 64
 num_workers: 12
 
-label_enhancement: RAW
+label_enhancement: LLM
 pseudo_labels: apmi_pseudo_labels
 text_features_source: TXT
 

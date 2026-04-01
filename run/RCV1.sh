@@ -4,7 +4,7 @@ model=RetrieverRoBERTa
 
 text_max_length=256
 label_max_length=256
-label_enhancement=RAW
+label_enhancement=LLM
 text_features_source=TXT
 
 # sparse_retrieve
