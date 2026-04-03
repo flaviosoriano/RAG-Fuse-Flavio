@@ -94,7 +94,7 @@ do
   python main.py \
     tasks=[fuse] \
     model=$model \
-    model.name=${label_enhancement}_V02_${model} \
+    model.name=${label_enhancement}_${model} \
     data=$data \
     data.text_features_source=$text_features_source \
     data.folds=[$fold_idx]
@@ -109,7 +109,7 @@ do
   python main.py \
     tasks=[aggregate] \
     model=$model \
-    model.name=${label_enhancement}_V02_${model} \
+    model.name=${label_enhancement}_${model} \
     data=$data \
     data.text_max_length=$text_max_length \
     data.label_max_length=$label_max_length \
