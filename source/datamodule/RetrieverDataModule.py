@@ -55,15 +55,14 @@ class RetrieverDataModule(pl.LightningDataModule):
 
             self.val_dataset = RetrieverFitDataset(
                 samples=self.samples,
-                ids_path=self.params.dir + f"fold_{self.fold_idx}/train.pkl",
+                ids_path=self.params.dir + f"fold_{self.fold_idx}/val.pkl",
                 labels_descriptions=self.labels_descriptions,
                 pseudo_labels=self.pseudo_labels,
                 text_features_source=self.params.text_features_source,
                 label_enhancement=self.params.label_enhancement,
                 tokenizer=self.tokenizer,
                 text_max_length=self.params.text_max_length,
-                label_max_length=self.params.label_max_length,
-                amount=0.1
+                label_max_length=self.params.label_max_length
             )
 
         if stage == "predict":
