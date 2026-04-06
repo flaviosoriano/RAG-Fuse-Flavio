@@ -10,7 +10,7 @@ vocabulary_size: 10000
 
 num_labels: 103
 num_texts: 804414
-num_relevant_labels: 2
+num_relevant_labels: 17
 
 llm:
   prompt_opt:

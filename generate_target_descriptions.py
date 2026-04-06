@@ -10,7 +10,7 @@ Overview:
   4. Builds one prompt per label from the selected training samples
   5. Either:
      - prints a dry-run summary with token / cost estimates, or
-     - generates descriptions via the OpenAI API
+     - generates descriptions via the OpenAI API in one or more sequential batches
   6. Saves `{label: description}` to
      `resource/llm/{DATASET}/target_descriptions.pkl`
 
@@ -70,6 +70,13 @@ Arguments:
   - `--sync`
       Use synchronous API calls instead of the Batch API.
 
+  - `--num_batches <int>`
+      Split the generated label-description requests into this many
+      sequential batches. Requests are partitioned as evenly as possible and
+      each batch is fully completed and persisted to the `.pkl` accumulator
+      before the next batch starts.
+      Default: `1`.
+
   - `--poll_interval <int>`
       Seconds between batch status checks.
       Default: `30`.
@@ -83,6 +90,7 @@ Usage:
     # Default batch mode: submit one request per label and wait for completion
     python generate_target_descriptions.py --dataset DBLP
     python generate_target_descriptions.py --dataset DBLP --model gpt-4o
+    python generate_target_descriptions.py --dataset DBLP --num_batches 4
 
     # Fixed-budget sampling with rare-label emphasis
     python generate_target_descriptions.py --dataset DBLP --max_samples 64
@@ -460,7 +468,7 @@ def build_gpt4_prompt(label: str, context_block: str) -> str:
     """
     return (
         f"You are an expert in text classification and domain analysis.\n\n"
-        f"Below is a set of texts and their associated labels from an academic dataset. "
+        f"Below is a set of texts and their associated labels from a dataset. "
         f"Your task is to generate a concise and informative description for the label '{label}'.\n\n"
         f"The description should:\n"
         f"- Capture the essence of the label as reflected in the texts\n"
@@ -563,13 +571,21 @@ def prepare_batch_jsonl(
     temperature: float,
     max_tokens: int = 512,
     output_dir: Path = None,
+    artifact_suffix: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """
     Write a .jsonl batch input file and a mapping JSON.
     Returns (jsonl_path, {custom_id: label} mapping).
     """
     id_to_label = {}
-    jsonl_path = (output_dir / "batch_input.jsonl") if output_dir else Path("batch_input.jsonl")
+    if artifact_suffix:
+        jsonl_name = f"batch_input_{artifact_suffix}.jsonl"
+        mapping_name = f"batch_mapping_{artifact_suffix}.json"
+    else:
+        jsonl_name = "batch_input.jsonl"
+        mapping_name = "batch_mapping.json"
+
+    jsonl_path = (output_dir / jsonl_name) if output_dir else Path(jsonl_name)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(jsonl_path, "w") as f:
@@ -593,13 +609,61 @@ def prepare_batch_jsonl(
             f.write(line + "\n")
 
     # Save mapping so we can resume with --batch_id later
-    mapping_path = jsonl_path.parent / "batch_mapping.json"
+    mapping_path = jsonl_path.parent / mapping_name
     with open(mapping_path, "w") as f:
         json.dump(id_to_label, f, indent=2)
 
     logger.info(f"Batch input written: {jsonl_path} ({len(labels)} requests)")
     logger.info(f"Label mapping saved: {mapping_path}")
     return str(jsonl_path), id_to_label
+
+
+def partition_labels_evenly(labels: list[str], num_batches: int) -> list[list[str]]:
+    """Split labels into `num_batches` ordered partitions as evenly as possible."""
+    base_size, remainder = divmod(len(labels), num_batches)
+    partitions: list[list[str]] = []
+    start = 0
+
+    for batch_idx in range(num_batches):
+        batch_size = base_size + (1 if batch_idx < remainder else 0)
+        end = start + batch_size
+        partitions.append(labels[start:end])
+        start = end
+
+    return partitions
+
+
+def load_description_accumulator(output_path: Path) -> dict[str, str]:
+    """Load an existing target_descriptions.pkl accumulator if present."""
+    if not output_path.exists():
+        return {}
+
+    with open(output_path, "rb") as f:
+        data = pickle.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Accumulator at {output_path} must contain a dict")
+
+    return data
+
+
+def persist_description_batch(
+    output_path: Path,
+    batch_descriptions: dict[str, str],
+) -> dict[str, str]:
+    """Merge one completed batch into the pickle accumulator and persist it."""
+    accumulated = load_description_accumulator(output_path)
+    accumulated.update(batch_descriptions)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "wb") as f:
+        pickle.dump(accumulated, f)
+
+    logger.info(
+        f"Persisted {len(batch_descriptions)} batch result(s) to {output_path} "
+        f"({len(accumulated)} total)"
+    )
+    return accumulated
 
 
 def submit_batch(client, jsonl_path: str):
@@ -768,8 +832,20 @@ def main():
         default=None,
         help="Resume polling on an existing batch ID (skips prompt building & upload)",
     )
+    parser.add_argument(
+        "--num_batches",
+        type=int,
+        default=1,
+        help=(
+            "Split generated requests into this many sequential batches "
+            "(default: 1)"
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.num_batches < 1:
+        parser.error("--num_batches must be at least 1")
 
     # ---- 1. Load data ----
     logger.info(f"=== Generating target descriptions for dataset: {args.dataset} ===")
@@ -798,6 +874,12 @@ def main():
         sampling_strategy=args.sampling_strategy,
         seed=args.seed,
     )
+    label_batches = partition_labels_evenly(labels, args.num_batches)
+    label_to_batch_idx = {
+        label: batch_idx
+        for batch_idx, batch_labels in enumerate(label_batches, start=1)
+        for label in batch_labels
+    }
 
     # ---- 3. Build prompts for all labels ----
     system_msg = SYSTEM_MSG
@@ -835,6 +917,7 @@ def main():
             logger.info(f"\n{'='*60}")
             logger.info(f"[DRY RUN] Label: {label}")
             logger.info(
+                f"Batch: {label_to_batch_idx[label]}/{args.num_batches} | "
                 f"Bucket: {label_to_bucket.get(label, 'unknown')} | "
                 f"Selected: {selection_stats[label]['selected']}/{selection_stats[label]['available']} "
                 f"(requested={selection_stats[label]['requested']}, freq={selection_stats[label]['frequency']})"
@@ -854,16 +937,19 @@ def main():
         logger.info(f"\n{'='*60}")
         logger.info("DRY-RUN SELECTION SUMMARY")
         logger.info(f"{'='*60}")
+        logger.info(f"Configured sequential batches: {args.num_batches}")
         logger.info(
-            f"{'Label':<35} {'Bucket':<8} {'Selected':>10} {'Avail':>10} {'Input':>10} {'Output':>10}"
+            f"{'Label':<35} {'Batch':<8} {'Bucket':<8} {'Selected':>10} {'Avail':>10} {'Input':>10} {'Output':>10}"
         )
         logger.info(
-            f"{'-'*35} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*10}"
+            f"{'-'*35} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*10}"
         )
         for entry in per_label_tokens:
             stats = selection_stats[entry["label"]]
+            batch_label = f"{label_to_batch_idx[entry['label']]}/{args.num_batches}"
             logger.info(
                 f"{entry['label']:<35} "
+                f"{batch_label:<8} "
                 f"{entry['bucket']:<8} "
                 f"{int(stats['selected']):>10,} "
                 f"{int(stats['available']):>10,} "
@@ -939,6 +1025,22 @@ def main():
         logger.info(f"{'='*60}")
         return
 
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = LLM_DIR / args.dataset / "target_descriptions.pkl"
+
+    non_empty_batches = [batch for batch in label_batches if batch]
+
+    if not non_empty_batches:
+        logger.error("No labels available to process.")
+        return
+
+    logger.info(
+        f"Prepared {len(labels)} label request(s) across {args.num_batches} batch(es); "
+        f"executing {len(non_empty_batches)} non-empty batch(es) sequentially"
+    )
+
     # ---- 4. Generate descriptions ----
     target_descriptions: dict[str, str] = {}
 
@@ -961,6 +1063,11 @@ def main():
         if batch.status == "completed":
             results = download_batch_results(client, batch.output_file_id)
             target_descriptions = parse_batch_results(results, id_to_label)
+            if target_descriptions:
+                target_descriptions = persist_description_batch(
+                    output_path,
+                    target_descriptions,
+                )
         else:
             logger.error(f"Batch ended with status: {batch.status}")
             if batch.error_file_id:
@@ -970,15 +1077,23 @@ def main():
     elif args.sync:
         # ---- Synchronous mode (old behavior, full price) ----
         logger.info("Using synchronous API calls (no batch discount)...")
-        for label in labels:
-            logger.info(f"Generating description for label: '{label}'...")
-            description = call_gpt4(
-                prompts[label],
-                model=args.model,
-                temperature=args.temperature,
+        for batch_idx, batch_labels in enumerate(non_empty_batches, start=1):
+            logger.info(
+                f"Starting sync batch {batch_idx}/{len(non_empty_batches)} "
+                f"with {len(batch_labels)} label(s)"
             )
-            target_descriptions[label] = description
-            logger.info(f"  -> Generated ({len(description)} chars): {description[:150]}...")
+            batch_descriptions: dict[str, str] = {}
+            for label in batch_labels:
+                logger.info(f"Generating description for label: '{label}'...")
+                description = call_gpt4(
+                    prompts[label],
+                    model=args.model,
+                    temperature=args.temperature,
+                )
+                batch_descriptions[label] = description
+                logger.info(f"  -> Generated ({len(description)} chars): {description[:150]}...")
+
+            target_descriptions = persist_description_batch(output_path, batch_descriptions)
 
     else:
         # ---- Batch mode (default – 50% cost discount) ----
@@ -986,52 +1101,59 @@ def main():
         llm_dir = LLM_DIR / args.dataset
         client = get_openai_client()
 
-        jsonl_path, id_to_label = prepare_batch_jsonl(
-            labels,
-            prompts,
-            model=args.model,
-            temperature=args.temperature,
-            max_tokens=max_output_tokens,
-            output_dir=llm_dir,
-        )
-
-        batch = submit_batch(client, jsonl_path)
-        logger.info(
-            f"\n  >>> Batch ID: {batch.id}\n"
-            f"  >>> To resume later: python {Path(__file__).name} "
-            f"--dataset {args.dataset} --batch_id {batch.id}\n"
-        )
-
-        batch = poll_batch(client, batch.id, args.poll_interval)
-
-        if batch.status == "completed":
-            results = download_batch_results(client, batch.output_file_id)
-            target_descriptions = parse_batch_results(results, id_to_label)
-        else:
-            logger.error(f"Batch ended with status: {batch.status}")
-            if batch.error_file_id:
-                logger.error(f"Error file ID: {batch.error_file_id}")
+        for batch_idx, batch_labels in enumerate(non_empty_batches, start=1):
             logger.info(
-                f"You can retry later with: python {Path(__file__).name} "
-                f"--dataset {args.dataset} --batch_id {batch.id}"
+                f"Starting Batch API batch {batch_idx}/{len(non_empty_batches)} "
+                f"with {len(batch_labels)} label(s)"
             )
-            return
+            batch_prompts = {label: prompts[label] for label in batch_labels}
+            artifact_suffix = None
+            if args.num_batches > 1:
+                artifact_suffix = f"{batch_idx}_of_{len(non_empty_batches)}"
+
+            jsonl_path, id_to_label = prepare_batch_jsonl(
+                batch_labels,
+                batch_prompts,
+                model=args.model,
+                temperature=args.temperature,
+                max_tokens=max_output_tokens,
+                output_dir=llm_dir,
+                artifact_suffix=artifact_suffix,
+            )
+
+            batch = submit_batch(client, jsonl_path)
+            logger.info(
+                f"\n  >>> Batch ID: {batch.id}\n"
+                f"  >>> Submitted batch {batch_idx}/{len(non_empty_batches)}\n"
+                f"  >>> To resume later: python {Path(__file__).name} "
+                f"--dataset {args.dataset} --batch_id {batch.id}\n"
+            )
+
+            batch = poll_batch(client, batch.id, args.poll_interval)
+
+            if batch.status == "completed":
+                results = download_batch_results(client, batch.output_file_id)
+                batch_descriptions = parse_batch_results(results, id_to_label)
+                if batch_descriptions:
+                    target_descriptions = persist_description_batch(
+                        output_path,
+                        batch_descriptions,
+                    )
+            else:
+                logger.error(f"Batch ended with status: {batch.status}")
+                if batch.error_file_id:
+                    logger.error(f"Error file ID: {batch.error_file_id}")
+                logger.info(
+                    f"You can retry later with: python {Path(__file__).name} "
+                    f"--dataset {args.dataset} --batch_id {batch.id}"
+                )
+                return
 
     if not target_descriptions:
         logger.error("No descriptions generated. Aborting save.")
         return
 
-    # ---- 5. Save target_descriptions.pkl ----
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = LLM_DIR / args.dataset / "target_descriptions.pkl"
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "wb") as f:
-        pickle.dump(target_descriptions, f)
-
+    # ---- 5. target_descriptions.pkl already persisted incrementally ----
     logger.info(f"\nSaved target_descriptions.pkl at: {output_path}")
     logger.info(f"Contents: {len(target_descriptions)} label descriptions")
 

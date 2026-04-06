@@ -36,8 +36,8 @@ do
     data.label_max_length=$label_max_length \
     data.label_enhancement=$label_enhancement \
     data.text_features_source=$text_features_source \
-    data.batch_size=32 \
-    data.num_workers=12 \
+    data.batch_size=128 \
+    data.num_workers=16 \
     data.folds=[$fold_idx]
   time_end=$(date '+%Y-%m-%d %H:%M:%S')
   echo "$time_start,$time_end" > resource/time/fit_${label_enhancement}_${model}_${data}_${fold_idx}.tmr
@@ -58,8 +58,8 @@ do
     data.label_max_length=$label_max_length \
     data.label_enhancement=$label_enhancement \
     data.text_features_source=$text_features_source \
-    data.batch_size=64 \
-    data.num_workers=12 \
+    data.batch_size=128 \
+    data.num_workers=16 \
     data.folds=[$fold_idx]
   time_end=$(date '+%Y-%m-%d %H:%M:%S')
   echo "$time_start,$time_end" > resource/time/predict_${label_enhancement}_${model}_${data}_${fold_idx}.tmr
@@ -80,8 +80,8 @@ do
     data.label_max_length=$label_max_length \
     data.label_enhancement=$label_enhancement \
     data.text_features_source=$text_features_source \
-    data.batch_size=64 \
-    data.num_workers=12 \
+    data.batch_size=128 \
+    data.num_workers=16 \
     data.folds=[$fold_idx]
   time_end=$(date '+%Y-%m-%d %H:%M:%S')
   echo "$time_start,$time_end" > resource/time/eval_${label_enhancement}_${model}_${data}_${fold_idx}.tmr
@@ -115,8 +115,8 @@ do
     data.label_max_length=$label_max_length \
     data.label_enhancement=$label_enhancement \
     data.text_features_source=$text_features_source \
-    data.batch_size=64 \
-    data.num_workers=12 \
+    data.batch_size=128 \
+    data.num_workers=16 \
     data.folds=[$fold_idx]
   time_end=$(date '+%Y-%m-%d %H:%M:%S')
   echo "$time_start,$time_end" > resource/time/aggregate_${label_enhancement}_${model}_${data}_${fold_idx}.tmr
