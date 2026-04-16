@@ -5,6 +5,8 @@ Your task is to optimize <prompt>prompt</prompt> such as show below:
 
 The prompt template contains template variables 'text_label_pairs' and 'target_label'. Given an input set of template variables, the formatted prompt is then given to an LLM to get an output.
 
+DO NOT ADD ANY OTHER TEMPLATE VARIABLES
+
 Below are some previous prompts with their scores. The score ranges from -1(worse) to 1(better).
 
 {prompts_scores}
